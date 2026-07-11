@@ -1,0 +1,2 @@
+pipeline_name,execution_date,source_layer,target_layer,pipeline_status,total_files_processed,created_by
+Olist Data Engineering Pipeline,2026-07-11 17:27:46.764181,Raw,Gold,SUCCESS,9,Airflow
