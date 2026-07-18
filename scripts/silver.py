@@ -1,101 +1,170 @@
-import os
+import sys
 from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    VALIDATION_PATH,
+    SILVER_PATH,
+    create_project_folders,
+)
+
+
+DATE_COLUMNS = {
+    "orders": [
+        "order_purchase_timestamp",
+        "order_approved_at",
+        "order_delivered_carrier_date",
+        "order_delivered_customer_date",
+        "order_estimated_delivery_date",
+    ],
+    "reviews": [
+        "review_creation_date",
+        "review_answer_timestamp",
+    ],
+    "order_items": [
+        "shipping_limit_date",
+    ],
+}
+
+
+NUMERIC_COLUMNS = {
+    "geolocation": [
+        "geolocation_lat",
+        "geolocation_lng",
+    ],
+    "order_items": [
+        "order_item_id",
+        "price",
+        "freight_value",
+    ],
+    "payments": [
+        "payment_sequential",
+        "payment_installments",
+        "payment_value",
+    ],
+    "products": [
+        "product_name_length",
+        "product_description_length",
+        "product_photos_qty",
+        "product_weight_g",
+        "product_length_cm",
+        "product_height_cm",
+        "product_width_cm",
+    ],
+}
+
+
 def run_silver():
-    """
-    Clean and standardize Bronze data into the Silver layer.
-    """
+
+    start_time = datetime.now()
+
+    create_project_folders()
 
     print("=" * 60)
     print("SILVER LAYER STARTED")
     print("=" * 60)
 
-    BASE_PATH = Path("/opt/airflow")
-
-    BRONZE_PATH = BASE_PATH / "data" / "bronze"
-    SILVER_PATH = BASE_PATH / "data" / "silver"
-
-    SILVER_PATH.mkdir(parents=True, exist_ok=True)
-
-    date_columns = {
-        "orders": [
-            "order_purchase_timestamp",
-            "order_approved_at",
-            "order_delivered_carrier_date",
-            "order_delivered_customer_date",
-            "order_estimated_delivery_date"
-        ],
-        "reviews": [
-            "review_creation_date",
-            "review_answer_timestamp"
-        ]
-    }
-
-    parquet_files = list(BRONZE_PATH.glob("*.parquet"))
+    parquet_files = list(
+        VALIDATION_PATH.glob("*.parquet")
+    )
 
     if not parquet_files:
         raise FileNotFoundError(
-            f"No parquet files found in {BRONZE_PATH}"
+            "No validated Parquet files found"
         )
 
-    for file in parquet_files:
+    for source_file in parquet_files:
 
-        table = file.stem
+        dataset_name = source_file.stem
+        dataframe = pd.read_parquet(source_file)
 
-        print(f"\nProcessing : {table}")
-
-        df = pd.read_parquet(file)
-
-        print(f"Original Rows : {len(df)}")
-
-        # Remove duplicates
-        before = len(df)
-        df = df.drop_duplicates()
-        print(f"Duplicates Removed : {before - len(df)}")
-
-        # Handle missing values
-        for col in df.columns:
-
-            if df[col].dtype == "object":
-                df[col] = df[col].fillna("Unknown")
-            else:
-                df[col] = df[col].fillna(0)
+        original_rows = len(dataframe)
 
         # Standardize column names
-        df.columns = (
-            df.columns
-            .str.lower()
-            .str.strip()
-            .str.replace(" ", "_")
-        )
+        dataframe.columns = [
+            column.strip().lower()
+            for column in dataframe.columns
+        ]
+
+        # Remove duplicate rows
+        dataframe = dataframe.drop_duplicates()
 
         # Convert date columns
-        if table in date_columns:
+        for column in DATE_COLUMNS.get(
+            dataset_name,
+            [],
+        ):
+            if column in dataframe.columns:
+                dataframe[column] = pd.to_datetime(
+                    dataframe[column],
+                    errors="coerce",
+                )
 
-            for col in date_columns[table]:
+        # Convert numeric columns
+        for column in NUMERIC_COLUMNS.get(
+            dataset_name,
+            [],
+        ):
+            if column in dataframe.columns:
+                dataframe[column] = pd.to_numeric(
+                    dataframe[column],
+                    errors="coerce",
+                )
 
-                if col in df.columns:
+        # Fill missing text values
+        text_columns = dataframe.select_dtypes(
+            include=["object", "string"]
+        ).columns
 
-                    df[col] = pd.to_datetime(
-                        df[col],
-                        errors="coerce"
-                    )
-
-        output_file = SILVER_PATH / file.name
-
-        df.to_parquet(
-            output_file,
-            index=False
+        dataframe[text_columns] = (
+            dataframe[text_columns]
+            .fillna("Unknown")
         )
 
-        print(f"Final Rows : {len(df)}")
-        print(f"Saved : {output_file.name}")
+        # Fill missing numeric values
+        numeric_columns = dataframe.select_dtypes(
+            include="number"
+        ).columns
 
-    print("\n" + "=" * 60)
+        dataframe[numeric_columns] = (
+            dataframe[numeric_columns]
+            .fillna(0)
+        )
+
+        dataframe["silver_timestamp"] = (
+            datetime.now()
+        )
+
+        output_file = (
+            SILVER_PATH
+            / f"{dataset_name}.parquet"
+        )
+
+        dataframe.to_parquet(
+            output_file,
+            index=False,
+        )
+
+        print(f"\nDataset           : {dataset_name}")
+        print(f"Original rows     : {original_rows}")
+        print(f"Duplicates removed: {original_rows - len(dataframe)}")
+        print(f"Final rows        : {len(dataframe)}")
+        print(f"Saved             : {output_file.name}")
+
+    execution_time = (
+        datetime.now() - start_time
+    ).total_seconds()
+
+    print("=" * 60)
     print("SILVER LAYER COMPLETED")
+    print(f"Execution time: {execution_time:.2f} seconds")
     print("=" * 60)
 
 

@@ -1,228 +1,155 @@
-from datetime import datetime
-import logging
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-from config import SILVER_PATH, GOLD_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    GOLD_PATH,
+    create_project_folders,
 )
 
 
 def run_gold():
 
-    start_time = datetime.now()
+    create_project_folders()
 
-    setup_logging("gold.log")
+    print("=" * 60)
+    print("GOLD LAYER STARTED")
+    print("=" * 60)
 
-    print_header("GOLD LAYER")
+    source_file = (
+        GOLD_PATH / "business_dataset.parquet"
+    )
 
-    try:
-
-        GOLD_PATH.mkdir(parents=True, exist_ok=True)
-
-        # -------------------------------------------------
-        # Read Silver Data
-        # -------------------------------------------------
-
-        customers = pd.read_parquet(
-            SILVER_PATH / "customers.parquet"
+    if not source_file.exists():
+        raise FileNotFoundError(
+            "business_dataset.parquet not found"
         )
 
-        orders = pd.read_parquet(
-            SILVER_PATH / "orders.parquet"
+    data = pd.read_parquet(source_file)
+
+    # Customer summary
+    customer_summary = (
+        data
+        .groupby(
+            [
+                "customer_unique_id",
+                "customer_city",
+            ],
+            as_index=False,
         )
-
-        order_items = pd.read_parquet(
-            SILVER_PATH / "order_items.parquet"
+        .agg(
+            total_orders=("order_id", "nunique"),
+            total_items=("order_item_id", "count"),
+            total_spent=("item_total", "sum"),
         )
+    )
 
-        products = pd.read_parquet(
-            SILVER_PATH / "products.parquet"
+    # Customer ranking
+    customer_summary["customer_rank"] = (
+        customer_summary["total_spent"]
+        .rank(
+            method="dense",
+            ascending=False,
         )
+        .astype(int)
+    )
 
-        print("Silver datasets loaded successfully")
+    customer_summary.to_parquet(
+        GOLD_PATH / "customer_summary.parquet",
+        index=False,
+    )
 
-        # -------------------------------------------------
-        # Remove Metadata Columns
-        # -------------------------------------------------
-
-        metadata_cols = [
-            "source_file",
-            "batch_id",
-            "load_timestamp"
-        ]
-
-        for df in [
-            customers,
-            orders,
-            order_items,
-            products
-        ]:
-            df.drop(
-                columns=metadata_cols,
-                errors="ignore",
-                inplace=True
-            )
-
-        # -------------------------------------------------
-        # Business Dataset
-        # -------------------------------------------------
-
-        business = (
-            orders
-            .merge(
-                customers,
-                on="customer_id",
-                how="left"
-            )
-            .merge(
-                order_items,
-                on="order_id",
-                how="left"
-            )
-            .merge(
-                products,
-                on="product_id",
-                how="left"
-            )
+    # Product summary
+    product_summary = (
+        data
+        .groupby(
+            [
+                "product_id",
+                "product_category_name_english",
+            ],
+            as_index=False,
         )
-
-        business.to_parquet(
-            GOLD_PATH / "business_dataset.parquet",
-            index=False
+        .agg(
+            total_orders=("order_id", "nunique"),
+            total_units=("order_item_id", "count"),
+            total_sales=("price", "sum"),
         )
+    )
 
-        print(
-            f"Business Dataset Created : {len(business)} rows"
+    product_summary.to_parquet(
+        GOLD_PATH / "product_summary.parquet",
+        index=False,
+    )
+
+    # Monthly summary
+    monthly_summary = (
+        data
+        .groupby(
+            [
+                "order_year",
+                "order_month",
+            ],
+            as_index=False,
         )
-
-        # -------------------------------------------------
-        # Customer Summary
-        # -------------------------------------------------
-
-        customer_summary = (
-            business
-            .groupby("customer_id")
-            .agg(
-                total_orders=("order_id", "nunique"),
-                total_spend=("price", "sum"),
-                avg_order_value=("price", "mean")
-            )
-            .reset_index()
+        .agg(
+            total_orders=("order_id", "nunique"),
+            total_customers=(
+                "customer_unique_id",
+                "nunique",
+            ),
+            total_revenue=("item_total", "sum"),
         )
+    )
 
-        customer_summary.to_parquet(
-            GOLD_PATH / "customer_summary.parquet",
-            index=False
+    monthly_summary.to_parquet(
+        GOLD_PATH / "monthly_summary.parquet",
+        index=False,
+    )
+
+    # Seller summary
+    seller_summary = (
+        data
+        .groupby(
+            [
+                "seller_id",
+                "seller_city",
+            ],
+            as_index=False,
         )
-
-        print("Customer Summary Created")
-
-        # -------------------------------------------------
-        # Product Summary
-        # -------------------------------------------------
-
-        product_summary = (
-            business
-            .groupby("product_category_name")
-            .agg(
-                total_products=("product_id", "count"),
-                total_sales=("price", "sum")
-            )
-            .reset_index()
+        .agg(
+            total_orders=("order_id", "nunique"),
+            total_items=("order_item_id", "count"),
+            total_sales=("price", "sum"),
         )
+    )
 
-        product_summary.to_parquet(
-            GOLD_PATH / "product_summary.parquet",
-            index=False
-        )
+    seller_summary.to_parquet(
+        GOLD_PATH / "seller_summary.parquet",
+        index=False,
+    )
 
-        print("Product Summary Created")
+    print(
+        f"Customer summary : {len(customer_summary)} rows"
+    )
+    print(
+        f"Product summary  : {len(product_summary)} rows"
+    )
+    print(
+        f"Monthly summary  : {len(monthly_summary)} rows"
+    )
+    print(
+        f"Seller summary   : {len(seller_summary)} rows"
+    )
 
-        # -------------------------------------------------
-        # Monthly Summary
-        # -------------------------------------------------
-
-        business["order_purchase_timestamp"] = pd.to_datetime(
-            business["order_purchase_timestamp"],
-            errors="coerce"
-        )
-
-        monthly_summary = (
-            business
-            .groupby(
-                business["order_purchase_timestamp"].dt.to_period("M")
-            )
-            .agg(
-                total_orders=("order_id", "nunique"),
-                total_sales=("price", "sum")
-            )
-            .reset_index()
-        )
-
-        monthly_summary[
-            "order_purchase_timestamp"
-        ] = monthly_summary[
-            "order_purchase_timestamp"
-        ].astype(str)
-
-        monthly_summary.to_parquet(
-            GOLD_PATH / "monthly_summary.parquet",
-            index=False
-        )
-
-        print("Monthly Summary Created")
-
-        # -------------------------------------------------
-        # Customer Rank
-        # -------------------------------------------------
-
-        customer_rank = (
-            business
-            .groupby("customer_id")
-            .agg(
-                total_orders=("order_id", "nunique"),
-                total_spend=("price", "sum")
-            )
-            .reset_index()
-        )
-
-        customer_rank["customer_rank"] = (
-            customer_rank["total_spend"]
-            .rank(
-                ascending=False,
-                method="dense"
-            )
-        )
-
-        customer_rank = customer_rank.sort_values(
-            by="customer_rank"
-        )
-
-        customer_rank.to_parquet(
-            GOLD_PATH / "customer_rank.parquet",
-            index=False
-        )
-
-        print("Customer Rank Created")
-
-        execution_time = get_execution_time(
-            start_time
-        )
-
-        logging.info(
-            f"Gold completed in {execution_time} seconds"
-        )
-
-        print_footer("GOLD LAYER")
-
-    except Exception as e:
-
-        logging.exception(e)
-        raise
+    print("=" * 60)
+    print("GOLD LAYER COMPLETED")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

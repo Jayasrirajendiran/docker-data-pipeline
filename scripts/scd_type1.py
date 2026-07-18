@@ -1,71 +1,71 @@
-from datetime import datetime
-import logging
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-from config import SILVER_PATH, SCD_TYPE1_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    SILVER_PATH,
+    SCD_TYPE1_PATH,
+    create_project_folders,
 )
 
 
 def run_scd_type1():
 
-    start_time = datetime.now()
+    create_project_folders()
 
-    setup_logging("scd_type1.log")
+    print("=" * 50)
+    print("SCD TYPE 1 STARTED")
+    print("=" * 50)
 
-    print_header("SCD TYPE 1")
+    source_file = SILVER_PATH / "customers.parquet"
 
-    try:
+    output_file = (
+        SCD_TYPE1_PATH
+        / "customer_dimension.parquet"
+    )
 
-        SCD_TYPE1_PATH.mkdir(parents=True, exist_ok=True)
-
-        input_file = SILVER_PATH / "customers.parquet"
-
-        if not input_file.exists():
-            raise FileNotFoundError(
-                f"{input_file} not found"
-            )
-
-        df = pd.read_parquet(input_file)
-
-        print(f"Original Rows : {len(df)}")
-
-        # Keep latest customer record
-        df = df.drop_duplicates(
-            subset=["customer_id"],
-            keep="last"
+    if not source_file.exists():
+        raise FileNotFoundError(
+            "customers.parquet not found in Silver"
         )
 
-        print(f"Rows After SCD Type 1 : {len(df)}")
+    new_data = pd.read_parquet(source_file)
 
-        output_file = (
-            SCD_TYPE1_PATH /
-            "customers_dimension.parquet"
+    # If the dimension already exists, combine old and new data
+    if output_file.exists():
+
+        old_data = pd.read_parquet(output_file)
+
+        final_data = pd.concat(
+            [old_data, new_data],
+            ignore_index=True,
         )
 
-        df.to_parquet(
-            output_file,
-            index=False
-        )
+    else:
 
-        print("Saved : customers_dimension.parquet")
+        final_data = new_data
 
-        execution_time = get_execution_time(start_time)
+    # Keep the latest value for each customer
+    final_data = final_data.drop_duplicates(
+        subset=["customer_id"],
+        keep="last",
+    )
 
-        logging.info(
-            f"SCD Type 1 completed in {execution_time} seconds"
-        )
+    final_data.to_parquet(
+        output_file,
+        index=False,
+    )
 
-        print_footer("SCD TYPE 1")
-
-    except Exception as e:
-
-        logging.exception(e)
-        raise
+    print(f"Source rows : {len(new_data)}")
+    print(f"Final rows  : {len(final_data)}")
+    print("SCD Type 1 completed")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

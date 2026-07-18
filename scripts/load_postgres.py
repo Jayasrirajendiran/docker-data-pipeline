@@ -1,71 +1,94 @@
-from datetime import datetime
-import logging
+import sys
+import psycopg2
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import create_engine
 
-from config import GOLD_PATH, SQLALCHEMY_DATABASE_URI
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    GOLD_PATH,
+    SCD_TYPE1_PATH,
+    SCD_TYPE2_PATH,
+    SQLALCHEMY_DATABASE_URI,
 )
 
 
 def run_load_postgres():
 
-    start_time = datetime.now()
+    print("=" * 60)
+    print("POSTGRESQL LOAD STARTED")
+    print("=" * 60)
 
-    setup_logging("load_postgres.log")
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URI
+    )
 
-    print_header("LOAD TO POSTGRESQL")
+    datasets = {
+        "business_dataset": (
+            GOLD_PATH / "business_dataset.parquet"
+        ),
+        "customer_summary": (
+            GOLD_PATH / "customer_summary.parquet"
+        ),
+        "product_summary": (
+            GOLD_PATH / "product_summary.parquet"
+        ),
+        "monthly_summary": (
+            GOLD_PATH / "monthly_summary.parquet"
+        ),
+        "seller_summary": (
+            GOLD_PATH / "seller_summary.parquet"
+        ),
+        "customer_dimension": (
+            SCD_TYPE1_PATH
+            / "customer_dimension.parquet"
+        ),
+        "product_dimension_history": (
+            SCD_TYPE2_PATH
+            / "product_dimension_history.parquet"
+        ),
+    }
 
     try:
 
-        engine = create_engine(SQLALCHEMY_DATABASE_URI)
-
-        datasets = {
-            "business_dataset": "business_dataset.parquet",
-            "customer_summary": "customer_summary.parquet",
-            "product_summary": "product_summary.parquet",
-            "monthly_summary": "monthly_summary.parquet",
-            "customer_rank": "customer_rank.parquet"
-        }
-
-        for table_name, file_name in datasets.items():
-
-            file_path = GOLD_PATH / file_name
+        for table_name, file_path in datasets.items():
 
             if not file_path.exists():
-                print(f"Skipped : {file_name}")
+
+                print(
+                    f"Skipped: {file_path.name} not found"
+                )
+
                 continue
 
-            df = pd.read_parquet(file_path)
+            dataframe = pd.read_parquet(file_path)
 
-            df.to_sql(
+            dataframe.to_sql(
                 name=table_name,
                 con=engine,
                 if_exists="replace",
-                index=False
+                index=False,
+                chunksize=5000,
+                method="multi",
             )
 
             print(
-                f"{table_name} -> {len(df)} rows loaded"
+                f"{table_name}: "
+                f"{len(dataframe)} rows loaded"
             )
 
-        execution_time = get_execution_time(start_time)
+        print("=" * 60)
+        print("POSTGRESQL LOAD COMPLETED")
+        print("=" * 60)
 
-        logging.info(
-            f"PostgreSQL loading completed in {execution_time} seconds"
-        )
+    finally:
 
-        print_footer("LOAD TO POSTGRESQL")
-
-    except Exception as e:
-
-        logging.exception(e)
-        raise
+        engine.dispose()
 
 
 if __name__ == "__main__":

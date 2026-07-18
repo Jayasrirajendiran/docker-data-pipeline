@@ -1,66 +1,175 @@
-from pathlib import Path
+import sys
+import json
 import shutil
+from pathlib import Path
 from datetime import datetime
-import logging
 
-from config import RAW_PATH, INGESTION_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_batch_id,
-    get_execution_time
+import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    DATASETS,
+    RAW_PATH,
+    INGESTION_PATH,
+    METADATA_PATH,
+    create_project_folders,
 )
+
+
+WATERMARK_FILE = METADATA_PATH / "watermark.json"
+
+
+def get_watermark():
+
+    if not WATERMARK_FILE.exists():
+        return None
+
+    with open(
+        WATERMARK_FILE,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        data = json.load(file)
+
+    return data.get("last_order_timestamp")
+
+
+def save_watermark(timestamp):
+
+    with open(
+        WATERMARK_FILE,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            {
+                "last_order_timestamp": timestamp
+            },
+            file,
+            indent=4,
+        )
 
 
 def run_ingestion():
 
     start_time = datetime.now()
 
-    setup_logging("ingestion.log")
+    create_project_folders()
 
-    print_header("INGESTION LAYER")
+    print("=" * 60)
+    print("DATA INGESTION STARTED")
+    print("=" * 60)
 
-    batch_id = get_batch_id()
+    for dataset_name, filename in DATASETS.items():
 
-    try:
+        source_file = RAW_PATH / filename
+        output_file = INGESTION_PATH / filename
 
-        INGESTION_PATH.mkdir(parents=True, exist_ok=True)
-
-        csv_files = list(RAW_PATH.glob("*.csv"))
-
-        if not csv_files:
+        if not source_file.exists():
             raise FileNotFoundError(
-                f"No CSV files found in {RAW_PATH}"
+                f"Source file not found: {source_file}"
             )
 
-        logging.info(f"Batch ID : {batch_id}")
+        # Incremental processing for orders
+        if dataset_name == "orders":
 
-        for file in csv_files:
+            orders = pd.read_csv(
+                source_file,
+                low_memory=False,
+            )
 
-            destination = INGESTION_PATH / file.name
+            orders["order_purchase_timestamp"] = (
+                pd.to_datetime(
+                    orders[
+                        "order_purchase_timestamp"
+                    ],
+                    errors="coerce",
+                )
+            )
 
-            shutil.copy(file, destination)
+            watermark = get_watermark()
 
-            print(f"Copied : {file.name}")
+            if watermark is None:
 
-            logging.info(f"Copied {file.name}")
+                new_orders = orders
+                load_type = "FULL LOAD"
+                mode = "w"
+                header = True
 
-        execution_time = get_execution_time(start_time)
+            else:
 
-        logging.info(
-            f"Ingestion completed in {execution_time} seconds"
-        )
+                new_orders = orders[
+                    orders[
+                        "order_purchase_timestamp"
+                    ]
+                    > pd.to_datetime(watermark)
+                ]
 
-        print_footer("INGESTION")
+                load_type = "INCREMENTAL LOAD"
+                mode = "a"
+                header = False
 
-    except Exception as e:
+            if new_orders.empty:
 
-        logging.exception(e)
+                print(
+                    "orders: 0 new records found"
+                )
 
-        raise
+            else:
+
+                new_orders.to_csv(
+                    output_file,
+                    mode=mode,
+                    header=header,
+                    index=False,
+                )
+
+                latest_timestamp = (
+                    new_orders[
+                        "order_purchase_timestamp"
+                    ]
+                    .max()
+                    .isoformat()
+                )
+
+                save_watermark(
+                    latest_timestamp
+                )
+
+                print(
+                    f"orders: {len(new_orders)} "
+                    f"records using {load_type}"
+                )
+
+        # Full snapshots for other datasets
+        else:
+
+            shutil.copyfile(
+                source_file,
+                output_file,
+            )
+
+            print(
+                f"{dataset_name}: "
+                f"Full snapshot copied"
+            )
+
+    execution_time = (
+        datetime.now() - start_time
+    ).total_seconds()
+
+    print("=" * 60)
+    print("DATA INGESTION COMPLETED")
+    print(
+        f"Execution time: "
+        f"{execution_time:.2f} seconds"
+    )
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-
     run_ingestion()

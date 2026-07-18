@@ -1,18 +1,28 @@
 # Python
 __pycache__/
 *.pyc
-
-# Airflow logs
-airflow/logs/
-
-# Log files
-*.log
-
-# Environment files
-.env
 .venv/
-venv/
 
-# OS files
-.DS_Store
-Thumbs.db
+# Environment and credentials
+.env
+
+# Generated data
+data/ingestion/
+data/bronze/
+data/validation/
+data/rejected/
+data/silver/
+data/scd_type1/
+data/scd_type2/
+data/gold/
+
+# Airflow output
+airflow/logs/
+logs/
+
+# Generated tracking files
+audit/*.csv
+metadata/*.csv
+
+# Database
+*.db

@@ -1,105 +1,134 @@
+import sys
+from pathlib import Path
 from datetime import datetime
-import logging
 
 import pandas as pd
 
-from config import BRONZE_PATH, VALIDATION_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    BRONZE_PATH,
+    VALIDATION_PATH,
+    REJECTED_PATH,
+    create_project_folders,
 )
 
 
+PRIMARY_KEYS = {
+    "customers": ["customer_id"],
+    "orders": ["order_id"],
+    "order_items": ["order_id", "order_item_id"],
+    "payments": ["order_id", "payment_sequential"],
+    "reviews": ["review_id"],
+    "products": ["product_id"],
+    "sellers": ["seller_id"],
+    "category_translation": ["product_category_name"],
+}
+
+
 def run_validation():
-    """
-    Validate Bronze datasets before Silver processing.
-    """
 
     start_time = datetime.now()
 
-    setup_logging("validation.log")
+    create_project_folders()
 
-    print_header("VALIDATION LAYER")
+    print("=" * 60)
+    print("DATA VALIDATION STARTED")
+    print("=" * 60)
 
-    VALIDATION_PATH.mkdir(parents=True, exist_ok=True)
+    parquet_files = list(
+        BRONZE_PATH.glob("*.parquet")
+    )
 
-    datasets = {
-        "customers": "customer_id",
-        "orders": "order_id",
-        "order_items": "order_id",
-        "products": "product_id",
-        "payments": "order_id",
-        "reviews": "review_id",
-        "geolocation": None,
-        "sellers": "seller_id",
-        "category_translation": "product_category_name"
-    }
-
-    try:
-
-        for table, primary_key in datasets.items():
-
-            file_path = BRONZE_PATH / f"{table}.parquet"
-
-            if not file_path.exists():
-                logging.warning(f"{table}.parquet not found")
-                continue
-
-            print(f"\nValidating : {table}")
-
-            df = pd.read_parquet(file_path)
-
-            logging.info(f"{table} : {len(df)} rows")
-
-            # Empty Dataset Check
-            if df.empty:
-                logging.warning(f"{table} is empty")
-                continue
-
-            # Primary Key NULL Check
-            if primary_key and primary_key in df.columns:
-
-                null_df = df[df[primary_key].isna()]
-
-                if not null_df.empty:
-
-                    null_df.to_csv(
-                        VALIDATION_PATH / f"{table}_null_pk.csv",
-                        index=False
-                    )
-
-                    logging.warning(
-                        f"{table} : {len(null_df)} NULL primary keys"
-                    )
-
-            # Duplicate Check
-            duplicates = df[df.duplicated()]
-
-            if not duplicates.empty:
-
-                duplicates.to_csv(
-                    VALIDATION_PATH / f"{table}_duplicates.csv",
-                    index=False
-                )
-
-                logging.warning(
-                    f"{table} : {len(duplicates)} duplicate rows"
-                )
-
-        execution_time = get_execution_time(start_time)
-
-        logging.info(
-            f"Validation completed in {execution_time} seconds"
+    if not parquet_files:
+        raise FileNotFoundError(
+            "No Bronze Parquet files found"
         )
 
-        print_footer("VALIDATION LAYER")
+    for source_file in parquet_files:
 
-    except Exception as e:
+        dataset_name = source_file.stem
+        dataframe = pd.read_parquet(source_file)
 
-        logging.exception(e)
-        raise
+        original_rows = len(dataframe)
+
+        # Initially, all rows are valid
+        invalid_rows = pd.Series(
+            False,
+            index=dataframe.index,
+        )
+
+        primary_keys = PRIMARY_KEYS.get(
+            dataset_name,
+            [],
+        )
+
+        if primary_keys:
+
+            # Check whether primary-key columns exist
+            missing_columns = [
+                column
+                for column in primary_keys
+                if column not in dataframe.columns
+            ]
+
+            if missing_columns:
+                raise ValueError(
+                    f"{dataset_name}: Missing columns "
+                    f"{missing_columns}"
+                )
+
+            # Find null primary keys
+            null_keys = dataframe[
+                primary_keys
+            ].isna().any(axis=1)
+
+            # Find duplicate primary keys
+            duplicate_keys = dataframe.duplicated(
+                subset=primary_keys,
+                keep="first",
+            )
+
+            invalid_rows = (
+                null_keys | duplicate_keys
+            )
+
+        valid_data = dataframe[
+            ~invalid_rows
+        ].copy()
+
+        rejected_data = dataframe[
+            invalid_rows
+        ].copy()
+
+        valid_data.to_parquet(
+            VALIDATION_PATH
+            / f"{dataset_name}.parquet",
+            index=False,
+        )
+
+        rejected_data.to_parquet(
+            REJECTED_PATH
+            / f"{dataset_name}_rejected.parquet",
+            index=False,
+        )
+
+        print(f"\nDataset       : {dataset_name}")
+        print(f"Original rows : {original_rows}")
+        print(f"Valid rows    : {len(valid_data)}")
+        print(f"Rejected rows : {len(rejected_data)}")
+
+    execution_time = (
+        datetime.now() - start_time
+    ).total_seconds()
+
+    print("=" * 60)
+    print("DATA VALIDATION COMPLETED")
+    print(f"Execution time: {execution_time:.2f} seconds")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

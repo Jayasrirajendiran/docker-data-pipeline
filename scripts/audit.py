@@ -1,58 +1,97 @@
+import sys
+from pathlib import Path
 from datetime import datetime
-import logging
+from uuid import uuid4
+
 import pandas as pd
 
-from config import AUDIT_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    AUDIT_PATH,
+    create_project_folders,
 )
 
 
-def run_audit():
+AUDIT_FILE = AUDIT_PATH / "audit_log.csv"
 
-    start_time = datetime.now()
 
-    setup_logging("audit.log")
+def run_audit(
+    status,
+    start_time,
+    error_message="",
+    run_id=None,
+):
+    """
+    Add one final audit record after pipeline execution.
+    """
 
-    print_header("AUDIT FRAMEWORK")
+    create_project_folders()
 
-    try:
+    end_time = datetime.now()
 
-        AUDIT_PATH.mkdir(parents=True, exist_ok=True)
-
-        audit = pd.DataFrame({
-            "pipeline_name": ["Olist Data Engineering Pipeline"],
-            "execution_date": [datetime.now()],
-            "status": ["SUCCESS"],
-            "processed_records": [117604],
-            "failed_records": [0]
-        })
-
-        output_file = AUDIT_PATH / "audit_log.csv"
-
-        audit.to_csv(
-            output_file,
-            index=False
+    # Remove timezone information when required
+    if hasattr(start_time, "tzinfo"):
+        start_time = start_time.replace(
+            tzinfo=None
         )
 
-        print(f"Audit file created : {output_file.name}")
+    execution_seconds = (
+        end_time - start_time
+    ).total_seconds()
 
-        execution_time = get_execution_time(start_time)
-
-        logging.info(
-            f"Audit completed in {execution_time} seconds"
+    if run_id is None:
+        run_id = (
+            f"RUN_{datetime.now():%Y%m%d_%H%M%S}_"
+            f"{uuid4().hex[:5]}"
         )
 
-        print_footer("AUDIT FRAMEWORK")
+    new_record = pd.DataFrame([{
+        "run_id": str(run_id),
+        "pipeline_name": "Olist Data Pipeline",
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "status": status,
+        "execution_seconds": round(
+            execution_seconds,
+            2,
+        ),
+        "error_message": str(error_message),
+    }])
 
-    except Exception as e:
+    if AUDIT_FILE.exists():
 
-        logging.exception(e)
-        raise
+        old_audit = pd.read_csv(
+            AUDIT_FILE,
+            dtype=str,
+        ).fillna("")
+
+        final_audit = pd.concat(
+            [old_audit, new_record],
+            ignore_index=True,
+        )
+
+    else:
+
+        final_audit = new_record
+
+    final_audit.to_csv(
+        AUDIT_FILE,
+        index=False,
+    )
+
+    print(
+        f"Audit recorded: "
+        f"{run_id} - {status}"
+    )
 
 
 if __name__ == "__main__":
-    run_audit()
+
+    print(
+        "Audit runs automatically at "
+        "the end of the pipeline"
+    )

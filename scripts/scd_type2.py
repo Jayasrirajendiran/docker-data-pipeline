@@ -1,85 +1,156 @@
+import sys
+from pathlib import Path
 from datetime import datetime
-import logging
 
 import pandas as pd
 
-from config import SCD_TYPE1_PATH, SCD_TYPE2_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    SILVER_PATH,
+    SCD_TYPE2_PATH,
+    create_project_folders,
 )
 
 
+TRACKED_COLUMNS = [
+    "product_category_name",
+    "product_weight_g",
+    "product_length_cm",
+    "product_height_cm",
+    "product_width_cm",
+]
+
+
 def run_scd_type2():
-    """
-    SCD Type 2
 
-    Maintains historical records by adding
-    effective dates, current flag and version.
-    """
+    create_project_folders()
 
-    start_time = datetime.now()
+    print("=" * 50)
+    print("SCD TYPE 2 STARTED")
+    print("=" * 50)
 
-    setup_logging("scd_type2.log")
+    source_file = SILVER_PATH / "products.parquet"
 
-    print_header("SCD TYPE 2")
+    output_file = (
+        SCD_TYPE2_PATH
+        / "product_dimension_history.parquet"
+    )
 
-    try:
+    if not source_file.exists():
+        raise FileNotFoundError(
+            "products.parquet not found in Silver"
+        )
 
-        SCD_TYPE2_PATH.mkdir(parents=True, exist_ok=True)
+    new_data = pd.read_parquet(source_file)
+    current_time = datetime.now()
 
-        input_file = SCD_TYPE1_PATH / "customers_dimension.parquet"
+    # First execution
+    if not output_file.exists():
 
-        if not input_file.exists():
-            raise FileNotFoundError(
-                f"{input_file} not found"
+        new_data["effective_from"] = current_time
+        new_data["effective_to"] = pd.NaT
+        new_data["is_current"] = True
+
+        final_data = new_data
+
+    # Later executions
+    else:
+
+        history_data = pd.read_parquet(output_file)
+
+        current_data = history_data[
+            history_data["is_current"] == True
+        ].set_index("product_id")
+
+        new_versions = []
+
+        for _, new_row in new_data.iterrows():
+
+            product_id = new_row["product_id"]
+
+            # New product
+            if product_id not in current_data.index:
+
+                new_versions.append(
+                    new_row.to_dict()
+                )
+
+                continue
+
+            old_row = current_data.loc[product_id]
+
+            # Check whether tracked values changed
+            changed = any(
+                str(old_row[column])
+                != str(new_row[column])
+                for column in TRACKED_COLUMNS
             )
 
-        df = pd.read_parquet(input_file)
+            if changed:
 
-        print(f"Original Rows : {len(df)}")
+                # Close the old record
+                history_data.loc[
+                    (
+                        history_data["product_id"]
+                        == product_id
+                    )
+                    & (
+                        history_data["is_current"]
+                        == True
+                    ),
+                    "effective_to",
+                ] = current_time
 
-        # -----------------------------
-        # SCD Type 2 Columns
-        # -----------------------------
+                history_data.loc[
+                    (
+                        history_data["product_id"]
+                        == product_id
+                    )
+                    & (
+                        history_data["is_current"]
+                        == True
+                    ),
+                    "is_current",
+                ] = False
 
-        current_time = datetime.now()
+                new_versions.append(
+                    new_row.to_dict()
+                )
 
-        df["effective_from"] = current_time
+        if new_versions:
 
-        df["effective_to"] = pd.NaT
+            new_version_data = pd.DataFrame(
+                new_versions
+            )
 
-        df["is_current"] = True
+            new_version_data["effective_from"] = (
+                current_time
+            )
+            new_version_data["effective_to"] = pd.NaT
+            new_version_data["is_current"] = True
 
-        df["version"] = 1
+            final_data = pd.concat(
+                [history_data, new_version_data],
+                ignore_index=True,
+            )
 
-        output_file = (
-            SCD_TYPE2_PATH /
-            "customers_dimension.parquet"
-        )
+        else:
 
-        df.to_parquet(
-            output_file,
-            index=False
-        )
+            final_data = history_data
 
-        print(f"Rows Written : {len(df)}")
-        print("Saved : customers_dimension.parquet")
+    final_data.to_parquet(
+        output_file,
+        index=False,
+    )
 
-        execution_time = get_execution_time(start_time)
-
-        logging.info(
-            f"SCD Type 2 completed in {execution_time} seconds"
-        )
-
-        print_footer("SCD TYPE 2")
-
-    except Exception as e:
-
-        logging.exception(e)
-        raise
+    print(f"Source rows  : {len(new_data)}")
+    print(f"History rows : {len(final_data)}")
+    print("SCD Type 2 completed")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

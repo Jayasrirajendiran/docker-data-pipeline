@@ -1,60 +1,132 @@
+import sys
+from pathlib import Path
 from datetime import datetime
-import logging
+
 import pandas as pd
 
-from config import METADATA_PATH
-from utils import (
-    setup_logging,
-    print_header,
-    print_footer,
-    get_execution_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+from scripts.config import (
+    RAW_PATH,
+    INGESTION_PATH,
+    BRONZE_PATH,
+    VALIDATION_PATH,
+    SILVER_PATH,
+    SCD_TYPE1_PATH,
+    SCD_TYPE2_PATH,
+    GOLD_PATH,
+    METADATA_PATH,
+    create_project_folders,
 )
 
 
-def run_metadata():
+METADATA_FILE = (
+    METADATA_PATH / "pipeline_metadata.csv"
+)
 
-    start_time = datetime.now()
 
-    setup_logging("metadata.log")
+def initialize_metadata():
+    """
+    Create an empty metadata file before the pipeline starts.
+    """
 
-    print_header("METADATA FRAMEWORK")
+    create_project_folders()
 
-    try:
+    columns = [
+        "dataset_name",
+        "layer",
+        "file_name",
+        "file_format",
+        "record_count",
+        "updated_at",
+    ]
 
-        METADATA_PATH.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=columns).to_csv(
+        METADATA_FILE,
+        index=False,
+    )
 
-        metadata = pd.DataFrame({
-            "pipeline_name": ["Olist Data Engineering Pipeline"],
-            "execution_date": [datetime.now()],
-            "source_layer": ["Raw"],
-            "target_layer": ["Gold"],
-            "pipeline_status": ["SUCCESS"],
-            "total_files_processed": [9],
-            "created_by": ["Airflow"]
-        })
+    print("Metadata initialized")
 
-        output_file = METADATA_PATH / "pipeline_metadata.csv"
 
-        metadata.to_csv(
-            output_file,
-            index=False
+def get_record_count(file_path):
+
+    if file_path.suffix == ".csv":
+
+        return len(
+            pd.read_csv(
+                file_path,
+                low_memory=False,
+            )
         )
 
-        print(f"Metadata file created : {output_file.name}")
+    if file_path.suffix == ".parquet":
 
-        execution_time = get_execution_time(start_time)
-
-        logging.info(
-            f"Metadata completed in {execution_time} seconds"
+        return len(
+            pd.read_parquet(file_path)
         )
 
-        print_footer("METADATA FRAMEWORK")
+    return 0
 
-    except Exception as e:
 
-        logging.exception(e)
-        raise
+def finalize_metadata():
+    """
+    Collect information about pipeline output files.
+    """
+
+    layers = {
+        "raw": RAW_PATH,
+        "ingestion": INGESTION_PATH,
+        "bronze": BRONZE_PATH,
+        "validation": VALIDATION_PATH,
+        "silver": SILVER_PATH,
+        "scd_type1": SCD_TYPE1_PATH,
+        "scd_type2": SCD_TYPE2_PATH,
+        "gold": GOLD_PATH,
+    }
+
+    metadata_records = []
+
+    for layer_name, folder_path in layers.items():
+
+        for file_path in folder_path.iterdir():
+
+            if file_path.suffix not in [
+                ".csv",
+                ".parquet",
+            ]:
+                continue
+
+            metadata_records.append({
+                "dataset_name": file_path.stem,
+                "layer": layer_name,
+                "file_name": file_path.name,
+                "file_format": (
+                    file_path.suffix.replace(".", "")
+                ),
+                "record_count": get_record_count(
+                    file_path
+                ),
+                "updated_at": datetime.now(),
+            })
+
+    metadata = pd.DataFrame(metadata_records)
+
+    metadata.to_csv(
+        METADATA_FILE,
+        index=False,
+    )
+
+    print(
+        f"Metadata finalized: "
+        f"{len(metadata)} files recorded"
+    )
 
 
 if __name__ == "__main__":
-    run_metadata()
+
+    initialize_metadata()
+    finalize_metadata()

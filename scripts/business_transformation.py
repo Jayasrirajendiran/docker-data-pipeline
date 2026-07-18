@@ -1,142 +1,182 @@
-import pandas as pd
-import os
+import sys
+from pathlib import Path
 from datetime import datetime
 
-SILVER_PATH = "/opt/airflow/data/silver"
-OUTPUT_PATH = "/opt/airflow/data/business_transformation"
+import pandas as pd
 
 
-def business_transformation():
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-    print("=" * 70)
-    print("BUSINESS TRANSFORMATION STARTED")
-    print("=" * 70)
 
-    os.makedirs(OUTPUT_PATH, exist_ok=True)
+from scripts.config import (
+    SILVER_PATH,
+    GOLD_PATH,
+    create_project_folders,
+)
 
-    # Read Silver data
-    orders = pd.read_parquet(f"{SILVER_PATH}/orders.parquet")
-    order_items = pd.read_parquet(f"{SILVER_PATH}/order_items.parquet")
-    customers = pd.read_parquet(f"{SILVER_PATH}/customers.parquet")
-    products = pd.read_parquet(f"{SILVER_PATH}/products.parquet")
-    categories = pd.read_parquet(
-        f"{SILVER_PATH}/category_translation.parquet"
+
+TECHNICAL_COLUMNS = [
+    "load_timestamp",
+    "batch_id",
+    "source_file",
+    "silver_timestamp",
+]
+
+
+def read_silver(filename):
+    """
+    Read a Silver file and remove technical columns
+    before joining.
+    """
+
+    dataframe = pd.read_parquet(
+        SILVER_PATH / filename
     )
 
-    # Remove audit columns from lookup tables
-    audit_cols = [
-        "source_file",
-        "load_timestamp",
-        "batch_id"
-    ]
+    return dataframe.drop(
+        columns=TECHNICAL_COLUMNS,
+        errors="ignore",
+    )
 
-    customers = customers.drop(columns=audit_cols, errors="ignore")
-    order_items = order_items.drop(columns=audit_cols, errors="ignore")
-    products = products.drop(columns=audit_cols, errors="ignore")
-    categories = categories.drop(columns=audit_cols, errors="ignore")
 
-    # -------------------------------
-    # 1. JOIN TRANSFORMATION
-    # -------------------------------
+def run_business_transformation():
 
-    df = orders.merge(
+    create_project_folders()
+
+    print("=" * 60)
+    print("BUSINESS TRANSFORMATION STARTED")
+    print("=" * 60)
+
+    # Read cleaned Silver datasets
+    customers = read_silver("customers.parquet")
+    orders = read_silver("orders.parquet")
+    order_items = read_silver("order_items.parquet")
+    payments = read_silver("payments.parquet")
+    products = read_silver("products.parquet")
+    sellers = read_silver("sellers.parquet")
+
+    translation = read_silver(
+        "category_translation.parquet"
+    )
+
+    # Aggregate payments by order
+    payment_summary = (
+        payments
+        .groupby("order_id", as_index=False)
+        .agg(
+            total_payment=(
+                "payment_value",
+                "sum",
+            ),
+            payment_count=(
+                "payment_sequential",
+                "count",
+            ),
+        )
+    )
+
+    # Join orders and customers
+    business_data = orders.merge(
         customers,
         on="customer_id",
-        how="left"
+        how="left",
     )
 
-    df = df.merge(
+    # Join order items
+    business_data = business_data.merge(
         order_items,
         on="order_id",
-        how="left"
+        how="left",
     )
 
-    df = df.merge(
+    # Join products
+    business_data = business_data.merge(
         products,
         on="product_id",
-        how="left"
+        how="left",
     )
 
-    # -------------------------------
-    # 2. LOOKUP MAPPING
-    # -------------------------------
-
-    if "product_category_name" in df.columns:
-        df = df.merge(
-            categories,
-            on="product_category_name",
-            how="left"
-        )
-
-    # -------------------------------
-    # 3. DERIVED COLUMNS
-    # -------------------------------
-
-    df["order_purchase_timestamp"] = pd.to_datetime(
-        df["order_purchase_timestamp"]
+    # Join sellers
+    business_data = business_data.merge(
+        sellers,
+        on="seller_id",
+        how="left",
+        suffixes=("_customer", "_seller"),
     )
 
-    df["order_delivered_customer_date"] = pd.to_datetime(
-        df["order_delivered_customer_date"]
+    # Lookup category English name
+    business_data = business_data.merge(
+        translation,
+        on="product_category_name",
+        how="left",
     )
 
-    df["delivery_days"] = (
-        df["order_delivered_customer_date"]
-        - df["order_purchase_timestamp"]
+    # Join payment summary
+    business_data = business_data.merge(
+        payment_summary,
+        on="order_id",
+        how="left",
+    )
+
+    # Derived columns
+    business_data["order_year"] = (
+        business_data[
+            "order_purchase_timestamp"
+        ].dt.year
+    )
+
+    business_data["order_month"] = (
+        business_data[
+            "order_purchase_timestamp"
+        ].dt.month
+    )
+
+    business_data["delivery_days"] = (
+        business_data[
+            "order_delivered_customer_date"
+        ]
+        - business_data[
+            "order_purchase_timestamp"
+        ]
     ).dt.days
 
-    df["purchase_year"] = (
-        df["order_purchase_timestamp"].dt.year
+    business_data["item_total"] = (
+        business_data["price"].fillna(0)
+        + business_data["freight_value"].fillna(0)
     )
 
-    df["purchase_month"] = (
-        df["order_purchase_timestamp"].dt.month
+    # Window function
+    business_data["customer_order_number"] = (
+        business_data
+        .groupby("customer_unique_id")[
+            "order_purchase_timestamp"
+        ]
+        .rank(method="dense")
     )
 
-    # -------------------------------
-    # 4. AGGREGATION
-    # -------------------------------
-
-    customer_summary = (
-        df.groupby("customer_id")
-        .agg(
-            total_orders=("order_id", "nunique"),
-            total_spend=("price", "sum"),
-            avg_order_value=("price", "mean")
-        )
-        .reset_index()
-    )
-
-    # -------------------------------
-    # 5. WINDOW FUNCTION
-    # -------------------------------
-
-    customer_summary["customer_rank"] = (
-        customer_summary["total_spend"]
-        .rank(
-            ascending=False,
-            method="dense"
-        )
-    )
-
-    # Merge customer summary
-    final_df = df.merge(
-        customer_summary,
-        on="customer_id",
-        how="left"
-    )
-
-    final_df["transformation_timestamp"] = datetime.now()
+    # Add final metadata
+    business_data[
+        "transformation_timestamp"
+    ] = datetime.now()
 
     output_file = (
-        f"{OUTPUT_PATH}/business_dataset.parquet"
+        GOLD_PATH / "business_dataset.parquet"
     )
 
-    final_df.to_parquet(output_file, index=False)
+    business_data.to_parquet(
+        output_file,
+        index=False,
+    )
 
-    print(f"Business transformation completed: {output_file}")
-    print("=" * 70)
+    print(f"Rows created    : {len(business_data)}")
+    print(f"Columns created : {len(business_data.columns)}")
+    print(f"Saved           : {output_file.name}")
+
+    print("=" * 60)
+    print("BUSINESS TRANSFORMATION COMPLETED")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    business_transformation()
+    run_business_transformation()
