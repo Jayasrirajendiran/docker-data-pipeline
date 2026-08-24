@@ -34,3 +34,5 @@ data/scd_type0/
 
 # Generated metadata state
 metadata/*.json
+
+data/incremental/
