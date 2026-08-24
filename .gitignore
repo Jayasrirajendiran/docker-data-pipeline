@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment and credentials
+.env
+
+# Generated data
+data/ingestion/
+data/bronze/
+data/validation/
+data/rejected/
+data/silver/
+data/scd_type1/
+data/scd_type2/
+data/gold/
+
+# Airflow output
+airflow/logs/
+logs/
+
+# Generated tracking files
+audit/*.csv
+metadata/*.csv
+
+# Database
+*.db
+
+# Generated pipeline outputs
+data/business_transformation/
+data/staging/
+data/scd_type0/
+
+# Generated metadata state
+metadata/*.json
